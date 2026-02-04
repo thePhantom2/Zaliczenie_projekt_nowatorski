@@ -16,13 +16,24 @@ const BALL_RADIUS = 16;
 const PLATFORM_HEIGHT = 16;
 const PLATFORM_WIDTH = 140;
 const PLATFORM_Y = SCREEN_HEIGHT - 200; // pozycja platformy wgzlędem wysokości
-const GRAVITY = 500; // px/s^2
-const RESTITUTION = 1.02; // zachowana energia po odbicu od platforamy
+const GRAVITY = 500; // px/s^2 (nieużywana stała — strojenie robi DIFF)
+const RESTITUTION = 1.02; // zachowana energia po odbicu od platforamy (nieużywana — strojenie robi DIFF)
 const SIDE_FRICTION = 0.85; //  zachowana energia po odbicu od bocznej krawędzi ekranu
 const ACCEL_SENSITIVITY = 1000; // jak szybko platforma się porusza
 const ACCEL_UPDATE_MS = 10; // odświerzanie acclerometra w mili sekunadach
 
-const HS_KEY = "gyro_bounce_highscore_v1";
+// Base key used to create per-difficulty keys.
+// This must be defined before any function that references it to avoid ReferenceError.
+const HS_KEY_BASE = "gyro_bounce_highscore_v1";
+
+/*
+  Zmodyfikowana wersja Game.js:
+  - obsługa poziomu trudności (props.difficulty: 'easy' | 'hard')
+  - ruchome przeszkody, kolizje z przeszkodami
+  - zapis i odczyt najwyższego wyniku (AsyncStorage) — oddzielny rekord dla każdej trudności
+  - przycisk powrotu do menu (onExit prop)
+  - zachowano i rozszerzono komentarze w języku polskim
+*/
 
 export default function Game({ difficulty = "easy", onExit = null }) {
   // funckaja do aktualizowania ekranu
@@ -54,20 +65,25 @@ export default function Game({ difficulty = "easy", onExit = null }) {
   // Difficulty tuning (nadpisuje niektóre stałe, zależnie od wybranego poziomu)
   const DIFF = {
     easy: {
-      gravity: 600,
-      restitution: 1.02,
-      platformWidth: Math.min(140, SCREEN_WIDTH * 0.6),
+      gravity: 2000,
+      restitution: 0.88,
+      platformWidth: Math.min(220, SCREEN_WIDTH * 0.6),
       obstaclesCount: 2,
       obstacleSpeed: 60,
     },
     hard: {
-      gravity: 700,
-      restitution: 1.02,
-      platformWidth: Math.min(100, SCREEN_WIDTH * 0.35),
+      gravity: 3000,
+      restitution: 0.75,
+      platformWidth: Math.min(140, SCREEN_WIDTH * 0.35),
       obstaclesCount: 6,
       obstacleSpeed: 160,
     },
   }[difficulty || "easy"];
+
+  // Helper: key for AsyncStorage per difficulty
+  function highScoreKeyFor(diff) {
+    return `${HS_KEY_BASE}_${diff}`;
+  }
 
   // Inicjalizacja przeszkód
   function rand(min, max) {
@@ -80,6 +96,7 @@ export default function Game({ difficulty = "easy", onExit = null }) {
       const w = rand(50, 120);
       const h = rand(10, 28);
       const y = rand(80, PLATFORM_Y - 160);
+      // range ruchu w poziomie
       const rangeMax = Math.max(40, SCREEN_WIDTH - w - 80);
       const range = rand(40, rangeMax);
       const baseX = rand(20, Math.max(20, SCREEN_WIDTH - w - 20 - range));
@@ -90,7 +107,7 @@ export default function Game({ difficulty = "easy", onExit = null }) {
     obstacles.current = obs;
   }
 
-  //Reset function
+  // Reset function
   function resetGame() {
     ball.current.x = SCREEN_WIDTH / 2;
     ball.current.y = PLATFORM_Y - 300;
@@ -105,18 +122,24 @@ export default function Game({ difficulty = "easy", onExit = null }) {
     setTick((t) => t + 1);
   }
 
-  //Załadowanie najwyższego wyniku
+  // Load highscore for current difficulty
+  async function loadHighScore(diff) {
+    try {
+      const key = highScoreKeyFor(diff);
+      const s = await AsyncStorage.getItem(key);
+      setHighScore(s ? Number(s) : 0);
+    } catch (e) {
+      console.warn("Nie udało się wczytać highscore", e);
+      setHighScore(0);
+    }
+  }
+
+  // Whenever difficulty changes, load its highscore and reset game for that difficulty
   useEffect(() => {
-    (async () => {
-      try {
-        const s = await AsyncStorage.getItem(HS_KEY);
-        setHighScore(s ? Number(s) : 0);
-      } catch (e) {
-        console.warn("Nie udało się wczytać highscore", e);
-        setHighScore(0);
-      }
-    })();
-  }, []);
+    loadHighScore(difficulty);
+    resetGame();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [difficulty]);
 
   // Czytanie danych z Accelerometer
   useEffect(() => {
@@ -125,11 +148,13 @@ export default function Game({ difficulty = "easy", onExit = null }) {
       accelX.current = data.x;
     });
 
+    // init obstacles on mount (also resetGame called by difficulty effect)
     initObstacles();
 
     return () => {
       sub && sub.remove();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Main loop
@@ -181,6 +206,7 @@ export default function Game({ difficulty = "easy", onExit = null }) {
   }
 
   function reflectVelocityAlongNormal(vx, vy, nx, ny, restitution) {
+    // odbicie wektora v względem normalnej n: v' = v - (1+e)*(v·n)*n
     const vdotn = vx * nx + vy * ny;
     const factor = (1 + restitution) * vdotn;
     return {
@@ -189,17 +215,35 @@ export default function Game({ difficulty = "easy", onExit = null }) {
     };
   }
 
+  async function trySaveHighScoreIfNeeded(finalScore) {
+    try {
+      const key = highScoreKeyFor(difficulty);
+      const s = await AsyncStorage.getItem(key);
+      const prev = s ? Number(s) : 0;
+      if (finalScore > prev) {
+        await AsyncStorage.setItem(key, String(finalScore));
+        setHighScore(finalScore);
+      } else {
+        setHighScore(prev);
+      }
+    } catch (e) {
+      console.warn("failed to save highscore", e);
+    }
+  }
+
   function updatePhysics(dt) {
     const b = ball.current;
     const p = platform.current;
 
     //Ruch platformy zależny od danych z acclerometra
-    const desiredVx = accelX.current * ACCEL_SENSITIVITY; // px/s
+    // Uwaga: orientacja osi accelerometru może się różnić między urządzeniami.
+    // Jeżeli platforma porusza się w przeciwną stronę, odwróć znak accelX przy obliczaniu desiredVx.
+    const desiredVx = accelX.current * ACCEL_SENSITIVITY; // px/s (zachowano oryginalną orientację)
     p.x += desiredVx * dt;
     if (p.x < 0) p.x = 0;
     if (p.x + p.width > SCREEN_WIDTH) p.x = SCREEN_WIDTH - p.width;
 
-    //Fizyka piłki
+    //Fizyka piłki (użyj wartości gravity z DIFF dla dynamicznego strojenia)
     b.vy += DIFF.gravity * dt;
     b.x += b.vx * dt;
     b.y += b.vy * dt;
@@ -219,9 +263,9 @@ export default function Game({ difficulty = "easy", onExit = null }) {
       b.vy = -b.vy * DIFF.restitution;
     }
 
-    //Kolidowanie z platformą
+    // Kolidowanie z platformą
     const nearestX = Math.max(p.x, Math.min(b.x, p.x + p.width));
-    const dy = b.y + b.radius - p.y;
+    const dy = b.y + b.radius - p.y; //dodatnia, gdy dolna część piłki znajduje się poniżej górnej części platformy
     const distX = Math.abs(nearestX - b.x);
     const collidedWithPlatform =
       dy >= 0 &&
@@ -231,11 +275,11 @@ export default function Game({ difficulty = "easy", onExit = null }) {
     if (collidedWithPlatform && b.vy > 0) {
       //danie piłki na góre platformy w chwili uderzenia
       b.y = p.y - b.radius - 0.01;
-      //odbicie
+      //odbicie (użyj restitution z DIFF)
       b.vy = -Math.abs(b.vy) * DIFF.restitution;
 
       //Nadaj pewną prędkość poziomą w oparciu o ruch platformy
-      b.vx += desiredVx * 0.35; //przekaz siły ruchu platformy na piłke
+      b.vx += desiredVx * 0.35; // przekaz siły ruchu platformy na piłke
 
       //dodaj drobne losowe zachwianie aby zachować chaotyczność
       b.vx += rand(-20, 20) * 0.02;
@@ -285,25 +329,12 @@ export default function Game({ difficulty = "easy", onExit = null }) {
       }
     }
 
-    //Sprawdza czy piłka wypadła przez dolny bok ekranu
+    //Sprawdza czy piłka wypadła przez dół ekranu
     if (b.y - b.radius > SCREEN_HEIGHT) {
       setRunning(false);
 
-      // zapisz wynik jeżeli jest nowym rekordem
-      (async () => {
-        try {
-          const s = await AsyncStorage.getItem(HS_KEY);
-          const prev = s ? Number(s) : 0;
-          if (score > prev) {
-            await AsyncStorage.setItem(HS_KEY, String(score));
-            setHighScore(score);
-          } else {
-            setHighScore(prev);
-          }
-        } catch (e) {
-          console.warn("failed to save highscore", e);
-        }
-      })();
+      // zapisz wynik jeżeli jest nowym rekordem (oddzielnie dla każdego poziomu)
+      trySaveHighScoreIfNeeded(score);
     }
   }
 
@@ -316,6 +347,7 @@ export default function Game({ difficulty = "easy", onExit = null }) {
       <View style={styles.topBar}>
         <Text style={styles.scoreText}>Bounces: {score}</Text>
 
+        {/* dodano wsparcie dla powrotu do menu i pokazanie trybu */}
         <View style={{ flexDirection: "row", alignItems: "center" }}>
           <Text style={styles.hintText}>
             {difficulty === "easy" ? "Łatwy" : "Trudny"}
@@ -396,7 +428,8 @@ export default function Game({ difficulty = "easy", onExit = null }) {
           </TouchableOpacity>
 
           <Text style={{ color: "#9aa4b2", marginTop: 8 }}>
-            Najlepszy wynik: {highScore === null ? "-" : highScore}
+            Najlepszy wynik ({difficulty === "easy" ? "Łatwy" : "Trudny"}):{" "}
+            {highScore === null ? "-" : highScore}
           </Text>
         </View>
       )}
