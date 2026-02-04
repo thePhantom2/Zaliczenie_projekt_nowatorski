@@ -8,7 +8,7 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-const HS_KEY = "gyro_bounce_highscore_v1";
+const HS_KEY_BASE = "gyro_bounce_highscore_v1";
 
 export default function Menu({ onStart }) {
   const [highScore, setHighScore] = useState(null);
@@ -17,7 +17,7 @@ export default function Menu({ onStart }) {
   useEffect(() => {
     (async () => {
       try {
-        const s = await AsyncStorage.getItem(HS_KEY);
+        const s = await AsyncStorage.getItem(HS_KEY_BASE);
         setHighScore(s ? Number(s) : 0);
       } catch (e) {
         console.warn("Failed to load high score", e);
