@@ -7,6 +7,7 @@ import {
   StyleSheet,
 } from "react-native";
 import { Accelerometer } from "expo-sensors";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
@@ -21,11 +22,14 @@ const SIDE_FRICTION = 0.85; //  zachowana energia po odbicu od bocznej krawędzi
 const ACCEL_SENSITIVITY = 1000; // jak szybko platforma się porusza
 const ACCEL_UPDATE_MS = 10; // odświerzanie acclerometra w mili sekunadach
 
-export default function Game() {
+const HS_KEY = "gyro_bounce_highscore_v1";
+
+export default function Game({ difficulty = "easy", onExit = null }) {
   // funckaja do aktualizowania ekranu
   const [, setTick] = useState(0); // odświerzania ekranu
   const [score, setScore] = useState(0);
   const [running, setRunning] = useState(true);
+  const [highScore, setHighScore] = useState(null);
 
   //Zmienne odniesienia do stanu gry
   const ball = useRef({
@@ -44,17 +48,75 @@ export default function Game() {
   const lastTimestamp = useRef(null);
   const rafId = useRef(null);
 
+  // obstacles (ruchome prostokąty)
+  const obstacles = useRef([]);
+
+  // Difficulty tuning (nadpisuje niektóre stałe, zależnie od wybranego poziomu)
+  const DIFF = {
+    easy: {
+      gravity: 600,
+      restitution: 1.02,
+      platformWidth: Math.min(140, SCREEN_WIDTH * 0.6),
+      obstaclesCount: 2,
+      obstacleSpeed: 60,
+    },
+    hard: {
+      gravity: 700,
+      restitution: 1.02,
+      platformWidth: Math.min(100, SCREEN_WIDTH * 0.35),
+      obstaclesCount: 6,
+      obstacleSpeed: 160,
+    },
+  }[difficulty || "easy"];
+
+  // Inicjalizacja przeszkód
+  function rand(min, max) {
+    return Math.random() * (max - min) + min;
+  }
+
+  function initObstacles() {
+    const obs = [];
+    for (let i = 0; i < DIFF.obstaclesCount; i++) {
+      const w = rand(50, 120);
+      const h = rand(10, 28);
+      const y = rand(80, PLATFORM_Y - 160);
+      const rangeMax = Math.max(40, SCREEN_WIDTH - w - 80);
+      const range = rand(40, rangeMax);
+      const baseX = rand(20, Math.max(20, SCREEN_WIDTH - w - 20 - range));
+      const speed = DIFF.obstacleSpeed * rand(0.7, 1.2);
+      const dir = Math.random() < 0.5 ? 1 : -1;
+      obs.push({ x: baseX, y, w, h, baseX, range, speed, dir });
+    }
+    obstacles.current = obs;
+  }
+
+  //Reset function
   function resetGame() {
     ball.current.x = SCREEN_WIDTH / 2;
     ball.current.y = PLATFORM_Y - 300;
     ball.current.vx = 0;
     ball.current.vy = 0;
-    platform.current.x = (SCREEN_WIDTH - PLATFORM_WIDTH) / 2;
+    platform.current.x = (SCREEN_WIDTH - DIFF.platformWidth) / 2;
+    platform.current.width = DIFF.platformWidth;
     setScore(0);
     setRunning(true);
     lastTimestamp.current = null;
+    initObstacles();
     setTick((t) => t + 1);
   }
+
+  //Załadowanie najwyższego wyniku
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await AsyncStorage.getItem(HS_KEY);
+        setHighScore(s ? Number(s) : 0);
+      } catch (e) {
+        console.warn("Nie udało się wczytać highscore", e);
+        setHighScore(0);
+      }
+    })();
+  }, []);
 
   // Czytanie danych z Accelerometer
   useEffect(() => {
@@ -62,6 +124,8 @@ export default function Game() {
     const sub = Accelerometer.addListener((data) => {
       accelX.current = data.x;
     });
+
+    initObstacles();
 
     return () => {
       sub && sub.remove();
@@ -76,7 +140,7 @@ export default function Game() {
         rafId.current = requestAnimationFrame(step);
         return;
       }
-      const dt = Math.min((timestamp - lastTimestamp.current) / 1000, 0.033);
+      const dt = Math.min((timestamp - lastTimestamp.current) / 1000, 0.05);
       lastTimestamp.current = timestamp;
 
       if (running) {
@@ -95,6 +159,36 @@ export default function Game() {
     };
   }, [running]);
 
+  // Pomocnicze funkcje kolizji
+  function clamp(v, a, b) {
+    return Math.max(a, Math.min(b, v));
+  }
+
+  function circleRectCollision(b, rect) {
+    const nearestX = clamp(b.x, rect.x, rect.x + rect.w);
+    const nearestY = clamp(b.y, rect.y, rect.y + rect.h);
+    const dx = b.x - nearestX;
+    const dy = b.y - nearestY;
+    const dist2 = dx * dx + dy * dy;
+    return {
+      collided: dist2 < b.radius * b.radius,
+      dx,
+      dy,
+      dist2,
+      nearestX,
+      nearestY,
+    };
+  }
+
+  function reflectVelocityAlongNormal(vx, vy, nx, ny, restitution) {
+    const vdotn = vx * nx + vy * ny;
+    const factor = (1 + restitution) * vdotn;
+    return {
+      vx: vx - factor * nx,
+      vy: vy - factor * ny,
+    };
+  }
+
   function updatePhysics(dt) {
     const b = ball.current;
     const p = platform.current;
@@ -106,7 +200,7 @@ export default function Game() {
     if (p.x + p.width > SCREEN_WIDTH) p.x = SCREEN_WIDTH - p.width;
 
     //Fizyka piłki
-    b.vy += GRAVITY * dt;
+    b.vy += DIFF.gravity * dt;
     b.x += b.vx * dt;
     b.y += b.vy * dt;
 
@@ -122,12 +216,12 @@ export default function Game() {
     //Uderzanie górną krawędz
     if (b.y - b.radius < 0) {
       b.y = b.radius;
-      b.vy = -b.vy * RESTITUTION;
+      b.vy = -b.vy * DIFF.restitution;
     }
 
-    // Kolidowanie z platformą
+    //Kolidowanie z platformą
     const nearestX = Math.max(p.x, Math.min(b.x, p.x + p.width));
-    const dy = b.y + b.radius - p.y; //dodatnia, gdy dolna część piłki znajduje się poniżej górnej części platformy
+    const dy = b.y + b.radius - p.y;
     const distX = Math.abs(nearestX - b.x);
     const collidedWithPlatform =
       dy >= 0 &&
@@ -138,21 +232,82 @@ export default function Game() {
       //danie piłki na góre platformy w chwili uderzenia
       b.y = p.y - b.radius - 0.01;
       //odbicie
-      b.vy = -Math.abs(b.vy) * RESTITUTION;
+      b.vy = -Math.abs(b.vy) * DIFF.restitution;
 
       //Nadaj pewną prędkość poziomą w oparciu o ruch platformy
-      b.vx += desiredVx * 0.35; // przekaz siły ruchu platformy na piłke
+      b.vx += desiredVx * 0.35; //przekaz siły ruchu platformy na piłke
+
+      //dodaj drobne losowe zachwianie aby zachować chaotyczność
+      b.vx += rand(-20, 20) * 0.02;
 
       //wynik
       setScore((s) => s + 1);
     }
 
-    //Sprawdza czy piłka wypadła prez dół ekranu
+    // Przeszkody: aktualizacja pozycji i kolizje
+    for (let obs of obstacles.current) {
+      // poruszaj przeszkodą po zdefiniowanym zakresie
+      obs.x += obs.dir * obs.speed * dt;
+      if (obs.x < obs.baseX) {
+        obs.x = obs.baseX;
+        obs.dir *= -1;
+      } else if (obs.x > obs.baseX + obs.range) {
+        obs.x = obs.baseX + obs.range;
+        obs.dir *= -1;
+      }
+
+      const rect = { x: obs.x, y: obs.y, w: obs.w, h: obs.h };
+      const res = circleRectCollision(b, rect);
+      if (res.collided) {
+        // Oblicz normalną i wypchnij piłkę poza przeszkodę
+        let dist = Math.sqrt(Math.max(1e-6, res.dist2));
+        let nx = res.dx / dist;
+        let ny = res.dy / dist;
+        if (!isFinite(nx) || !isFinite(ny)) {
+          // środek wewnątrz prostokąta -> wymuś odbicie w górę
+          nx = 0;
+          ny = -1;
+        }
+        const overlap = b.radius - dist;
+        b.x += nx * overlap;
+        b.y += ny * overlap;
+
+        // odbicie według normalnej z dodatkowym chaotycznym przyrostem
+        const newV = reflectVelocityAlongNormal(
+          b.vx,
+          b.vy,
+          nx,
+          ny,
+          DIFF.restitution
+        );
+        b.vx = newV.vx + rand(-30, 30) * 0.02;
+        b.vy = newV.vy + rand(-30, 30) * 0.02;
+      }
+    }
+
+    //Sprawdza czy piłka wypadła przez dolny bok ekranu
     if (b.y - b.radius > SCREEN_HEIGHT) {
       setRunning(false);
+
+      // zapisz wynik jeżeli jest nowym rekordem
+      (async () => {
+        try {
+          const s = await AsyncStorage.getItem(HS_KEY);
+          const prev = s ? Number(s) : 0;
+          if (score > prev) {
+            await AsyncStorage.setItem(HS_KEY, String(score));
+            setHighScore(score);
+          } else {
+            setHighScore(prev);
+          }
+        } catch (e) {
+          console.warn("failed to save highscore", e);
+        }
+      })();
     }
   }
 
+  // Render helpers to read current state
   const b = ball.current;
   const p = platform.current;
 
@@ -160,7 +315,18 @@ export default function Game() {
     <View style={styles.container}>
       <View style={styles.topBar}>
         <Text style={styles.scoreText}>Bounces: {score}</Text>
-        <Text style={styles.hintText}>Tilt device to move platform</Text>
+
+        <View style={{ flexDirection: "row", alignItems: "center" }}>
+          <Text style={styles.hintText}>
+            {difficulty === "easy" ? "Łatwy" : "Trudny"}
+          </Text>
+          <TouchableOpacity
+            onPress={() => onExit && onExit()}
+            style={styles.smallButton}
+          >
+            <Text style={styles.smallButtonText}>Menu</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.playArea}>
@@ -191,11 +357,27 @@ export default function Game() {
             },
           ]}
         />
+
+        {/* Obstacles */}
+        {obstacles.current.map((o, i) => (
+          <View
+            key={i}
+            style={[
+              styles.obstacle,
+              {
+                width: o.w,
+                height: o.h,
+                transform: [{ translateX: o.x }, { translateY: o.y }],
+                backgroundColor: difficulty === "easy" ? "#ff6b6b" : "#ff4d4d",
+              },
+            ]}
+          />
+        ))}
       </View>
 
       {!running && (
         <View style={styles.overlay}>
-          <Text style={styles.gameOverText}>Game Over</Text>
+          <Text style={styles.gameOverText}>Koniec gry</Text>
           <Text style={styles.finalScoreText}>Bounces: {score}</Text>
           <TouchableOpacity
             onPress={resetGame}
@@ -204,6 +386,18 @@ export default function Game() {
           >
             <Text style={styles.buttonText}>Restart</Text>
           </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={() => onExit && onExit()}
+            style={[styles.button, { marginTop: 12, backgroundColor: "#555" }]}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.buttonText}>Menu</Text>
+          </TouchableOpacity>
+
+          <Text style={{ color: "#9aa4b2", marginTop: 8 }}>
+            Najlepszy wynik: {highScore === null ? "-" : highScore}
+          </Text>
         </View>
       )}
     </View>
@@ -216,9 +410,12 @@ const styles = StyleSheet.create({
     height: 80,
     paddingHorizontal: 16,
     justifyContent: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
   },
   scoreText: { color: "#fff", fontSize: 20, fontWeight: "700" },
-  hintText: { color: "#9aa4b2", fontSize: 12 },
+  hintText: { color: "#9aa4b2", fontSize: 12, marginRight: 12 },
   playArea: { flex: 1 },
   ball: {
     position: "absolute",
@@ -237,6 +434,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#04a77a",
   },
+  obstacle: {
+    position: "absolute",
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.3)",
+  },
   overlay: {
     position: "absolute",
     left: 0,
@@ -254,4 +457,12 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   buttonText: { color: "#fff", fontSize: 16, fontWeight: "700" },
+  smallButton: {
+    marginLeft: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "#234",
+    borderRadius: 8,
+  },
+  smallButtonText: { color: "#fff", fontSize: 12 },
 });
