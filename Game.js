@@ -26,15 +26,6 @@ const ACCEL_UPDATE_MS = 10; // odświerzanie acclerometra w mili sekunadach
 // This must be defined before any function that references it to avoid ReferenceError.
 const HS_KEY_BASE = "gyro_bounce_highscore_v1";
 
-/*
-  Zmodyfikowana wersja Game.js:
-  - obsługa poziomu trudności (props.difficulty: 'easy' | 'hard')
-  - ruchome przeszkody, kolizje z przeszkodami
-  - zapis i odczyt najwyższego wyniku (AsyncStorage) — oddzielny rekord dla każdej trudności
-  - przycisk powrotu do menu (onExit prop)
-  - zachowano i rozszerzono komentarze w języku polskim
-*/
-
 export default function Game({ difficulty = "easy", onExit = null }) {
   // funckaja do aktualizowania ekranu
   const [, setTick] = useState(0); // odświerzania ekranu
